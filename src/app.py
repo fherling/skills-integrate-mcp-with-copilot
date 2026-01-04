@@ -36,12 +36,21 @@ def save_activities_to_disk():
         if not activities_dirty:
             return  # No changes to save
         try:
-            with open(activities_file, 'w') as f:
-                json.dump(activities, f, indent=2)
+            # Create a snapshot of activities while holding the lock
+            activities_snapshot = json.loads(json.dumps(activities))
+        except (TypeError, ValueError) as e:
+            print(f"Error serializing activities: {e}")
+            return
+    
+    # Write to disk outside the lock to minimize lock duration
+    try:
+        with open(activities_file, 'w') as f:
+            json.dump(activities_snapshot, f, indent=2)
+        with activities_lock:
             activities_dirty = False
-        except OSError as e:
-            # Log error but don't raise - background task should continue
-            print(f"Error saving activities: {e}")
+    except OSError as e:
+        # Log error but don't raise - background task should continue
+        print(f"Error saving activities: {e}")
 
 def mark_activities_dirty():
     """Mark activities as modified"""
@@ -63,13 +72,13 @@ async def lifespan(app: FastAPI):
     """Manage startup and shutdown events"""
     global save_thread
     # Startup: Start background save thread
-    save_thread = threading.Thread(target=periodic_save, daemon=True)
+    save_thread = threading.Thread(target=periodic_save, daemon=False)
     save_thread.start()
     yield
     # Shutdown: Stop background thread and save pending changes
     shutdown_event.set()
     if save_thread:
-        save_thread.join(timeout=2)
+        save_thread.join(timeout=10)  # Increased timeout for large files
     save_activities_to_disk()
 
 app = FastAPI(
