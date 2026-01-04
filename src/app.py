@@ -30,8 +30,15 @@ def load_activities():
 
 def save_activities():
     """Save activities to JSON file"""
-    with open(activities_file, 'w') as f:
-        json.dump(activities, f, indent=2)
+    try:
+        with open(activities_file, 'w') as f:
+            json.dump(activities, f, indent=2)
+    except OSError:
+        # Convert file I/O errors into a clear HTTP error response
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save activities"
+        )
 
 # Load activities at startup
 activities = load_activities()
