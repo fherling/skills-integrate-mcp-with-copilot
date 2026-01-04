@@ -8,40 +8,101 @@ for extracurricular activities at Mergington High School.
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from contextlib import asynccontextmanager
 import os
 import json
 from pathlib import Path
-
-app = FastAPI(title="Mergington High School API",
-              description="API for viewing and signing up for extracurricular activities")
-
-# Mount the static files directory
-current_dir = Path(__file__).parent
-app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
-          "static")), name="static")
+import threading
+import copy
 
 # Load activities from JSON file
 activities_file = os.path.join(Path(__file__).parent, "activities.json")
+
+# Configuration constants
+SAVE_INTERVAL_SECONDS = 5  # How often to batch-save changes to disk
+SHUTDOWN_TIMEOUT_SECONDS = 10  # Maximum time to wait for background thread during shutdown
+
+# Flag to track if activities have been modified
+activities_dirty = False
+activities_lock = threading.Lock()
+shutdown_event = threading.Event()
+save_thread = None
 
 def load_activities():
     """Load activities from JSON file"""
     with open(activities_file, 'r') as f:
         return json.load(f)
 
-def save_activities():
-    """Save activities to JSON file"""
+def save_activities_to_disk():
+    """Save activities to JSON file (actual disk write)"""
+    global activities_dirty
+    with activities_lock:
+        if not activities_dirty:
+            return  # No changes to save
+        try:
+            # Create a snapshot of activities while holding the lock
+            activities_snapshot = copy.deepcopy(activities)
+            # Clear dirty flag while still holding the lock
+            # If changes happen after this point, they'll set it again
+            activities_dirty = False
+        except Exception as e:
+            print(f"Error creating snapshot of activities: {e}")
+            return
+    
+    # Write to disk outside the lock to minimize lock duration
     try:
         with open(activities_file, 'w') as f:
-            json.dump(activities, f, indent=2)
-    except OSError:
-        # Convert file I/O errors into a clear HTTP error response
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to save activities"
-        )
+            json.dump(activities_snapshot, f, indent=2)
+    except OSError as e:
+        # Log error but don't raise - background task should continue
+        # Mark as dirty again so we retry on the next cycle
+        with activities_lock:
+            activities_dirty = True
+        print(f"Error saving activities: {e}")
+
+def mark_activities_dirty():
+    """Mark activities as modified"""
+    global activities_dirty
+    with activities_lock:
+        activities_dirty = True
+
+def periodic_save():
+    """Background task to periodically save activities"""
+    while not shutdown_event.is_set():
+        # Use wait instead of sleep for more responsive shutdown
+        if shutdown_event.wait(SAVE_INTERVAL_SECONDS):
+            # shutdown_event was set, exit immediately without saving
+            # (lifespan handler will do the final save)
+            break
+        save_activities_to_disk()
 
 # Load activities at startup
 activities = load_activities()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown events"""
+    global save_thread
+    # Startup: Start background save thread
+    save_thread = threading.Thread(target=periodic_save, daemon=True)
+    save_thread.start()
+    yield
+    # Shutdown: Stop background thread and save pending changes
+    shutdown_event.set()
+    if save_thread:
+        save_thread.join(timeout=SHUTDOWN_TIMEOUT_SECONDS)
+    save_activities_to_disk()
+
+app = FastAPI(
+    title="Mergington High School API",
+    description="API for viewing and signing up for extracurricular activities",
+    lifespan=lifespan
+)
+
+# Mount the static files directory
+current_dir = Path(__file__).parent
+app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
+          "static")), name="static")
 
 
 @app.get("/")
@@ -82,7 +143,7 @@ def signup_for_activity(activity_name: str, email: str):
             )
     # Add student
     activity["participants"].append(email)
-    save_activities()  # Persist changes to JSON file
+    mark_activities_dirty()  # Mark for batched save
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
@@ -105,5 +166,5 @@ def unregister_from_activity(activity_name: str, email: str):
 
     # Remove student
     activity["participants"].remove(email)
-    save_activities()  # Persist changes to JSON file
+    mark_activities_dirty()  # Mark for batched save
     return {"message": f"Unregistered {email} from {activity_name}"}
