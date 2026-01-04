@@ -81,8 +81,7 @@ def signup_for_activity(activity_name: str, email: str):
         # Add student
         activity["participants"].append(email)
         save_activities(activities)  # Persist changes to JSON file
-        
-    return {"message": f"Signed up {email} for {activity_name}"}
+        return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/unregister")
@@ -110,5 +109,4 @@ def unregister_from_activity(activity_name: str, email: str):
         # Remove student
         activity["participants"].remove(email)
         save_activities(activities)  # Persist changes to JSON file
-        
-    return {"message": f"Unregistered {email} from {activity_name}"}
+        return {"message": f"Unregistered {email} from {activity_name}"}
