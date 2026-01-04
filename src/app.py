@@ -71,6 +71,15 @@ def signup_for_activity(activity_name: str, email: str):
             detail="Student is already signed up"
         )
 
+    # Validate activity is not at maximum capacity (if a limit is defined)
+    max_participants = activity.get("max_participants")
+    if max_participants is not None:
+        current_count = len(activity.get("participants", []))
+        if current_count >= max_participants:
+            raise HTTPException(
+                status_code=400,
+                detail="Activity is at full capacity"
+            )
     # Add student
     activity["participants"].append(email)
     save_activities()  # Persist changes to JSON file
