@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import threading
 import time
+import copy
 
 # Load activities from JSON file
 activities_file = os.path.join(Path(__file__).parent, "activities.json")
@@ -37,9 +38,9 @@ def save_activities_to_disk():
             return  # No changes to save
         try:
             # Create a snapshot of activities while holding the lock
-            activities_snapshot = json.loads(json.dumps(activities))
-        except (TypeError, ValueError) as e:
-            print(f"Error serializing activities: {e}")
+            activities_snapshot = copy.deepcopy(activities)
+        except Exception as e:
+            print(f"Error creating snapshot of activities: {e}")
             return
     
     # Write to disk outside the lock to minimize lock duration
@@ -61,7 +62,8 @@ def mark_activities_dirty():
 def periodic_save():
     """Background task to periodically save activities"""
     while not shutdown_event.is_set():
-        time.sleep(5)  # Save every 5 seconds if there are changes
+        # Use wait instead of sleep for more responsive shutdown
+        shutdown_event.wait(5)  # Save every 5 seconds if there are changes
         save_activities_to_disk()
 
 # Load activities at startup
