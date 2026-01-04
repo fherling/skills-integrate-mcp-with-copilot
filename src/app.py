@@ -8,74 +8,101 @@ for extracurricular activities at Mergington High School.
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from contextlib import asynccontextmanager
 import os
+import json
 from pathlib import Path
+import threading
+import copy
 
-app = FastAPI(title="Mergington High School API",
-              description="API for viewing and signing up for extracurricular activities")
+# Load activities from JSON file
+activities_file = os.path.join(Path(__file__).parent, "activities.json")
+
+# Configuration constants
+SAVE_INTERVAL_SECONDS = 5  # How often to batch-save changes to disk
+SHUTDOWN_TIMEOUT_SECONDS = 10  # Maximum time to wait for background thread during shutdown
+
+# Flag to track if activities have been modified
+activities_dirty = False
+activities_lock = threading.Lock()
+shutdown_event = threading.Event()
+save_thread = None
+
+def load_activities():
+    """Load activities from JSON file"""
+    with open(activities_file, 'r') as f:
+        return json.load(f)
+
+def save_activities_to_disk():
+    """Save activities to JSON file (actual disk write)"""
+    global activities_dirty
+    with activities_lock:
+        if not activities_dirty:
+            return  # No changes to save
+        try:
+            # Create a snapshot of activities while holding the lock
+            activities_snapshot = copy.deepcopy(activities)
+            # Clear dirty flag while still holding the lock
+            # If changes happen after this point, they'll set it again
+            activities_dirty = False
+        except Exception as e:
+            print(f"Error creating snapshot of activities: {e}")
+            return
+    
+    # Write to disk outside the lock to minimize lock duration
+    try:
+        with open(activities_file, 'w') as f:
+            json.dump(activities_snapshot, f, indent=2)
+    except OSError as e:
+        # Log error but don't raise - background task should continue
+        # Mark as dirty again so we retry on the next cycle
+        with activities_lock:
+            activities_dirty = True
+        print(f"Error saving activities: {e}")
+
+def mark_activities_dirty():
+    """Mark activities as modified"""
+    global activities_dirty
+    with activities_lock:
+        activities_dirty = True
+
+def periodic_save():
+    """Background task to periodically save activities"""
+    while not shutdown_event.is_set():
+        # Use wait instead of sleep for more responsive shutdown
+        if shutdown_event.wait(SAVE_INTERVAL_SECONDS):
+            # shutdown_event was set, exit immediately without saving
+            # (lifespan handler will do the final save)
+            break
+        save_activities_to_disk()
+
+# Load activities at startup
+activities = load_activities()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown events"""
+    global save_thread
+    # Startup: Start background save thread
+    save_thread = threading.Thread(target=periodic_save, daemon=True)
+    save_thread.start()
+    yield
+    # Shutdown: Stop background thread and save pending changes
+    shutdown_event.set()
+    if save_thread:
+        save_thread.join(timeout=SHUTDOWN_TIMEOUT_SECONDS)
+    save_activities_to_disk()
+
+app = FastAPI(
+    title="Mergington High School API",
+    description="API for viewing and signing up for extracurricular activities",
+    lifespan=lifespan
+)
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
-
-# In-memory activity database
-activities = {
-    "Chess Club": {
-        "description": "Learn strategies and compete in chess tournaments",
-        "schedule": "Fridays, 3:30 PM - 5:00 PM",
-        "max_participants": 12,
-        "participants": ["michael@mergington.edu", "daniel@mergington.edu"]
-    },
-    "Programming Class": {
-        "description": "Learn programming fundamentals and build software projects",
-        "schedule": "Tuesdays and Thursdays, 3:30 PM - 4:30 PM",
-        "max_participants": 20,
-        "participants": ["emma@mergington.edu", "sophia@mergington.edu"]
-    },
-    "Gym Class": {
-        "description": "Physical education and sports activities",
-        "schedule": "Mondays, Wednesdays, Fridays, 2:00 PM - 3:00 PM",
-        "max_participants": 30,
-        "participants": ["john@mergington.edu", "olivia@mergington.edu"]
-    },
-    "Soccer Team": {
-        "description": "Join the school soccer team and compete in matches",
-        "schedule": "Tuesdays and Thursdays, 4:00 PM - 5:30 PM",
-        "max_participants": 22,
-        "participants": ["liam@mergington.edu", "noah@mergington.edu"]
-    },
-    "Basketball Team": {
-        "description": "Practice and play basketball with the school team",
-        "schedule": "Wednesdays and Fridays, 3:30 PM - 5:00 PM",
-        "max_participants": 15,
-        "participants": ["ava@mergington.edu", "mia@mergington.edu"]
-    },
-    "Art Club": {
-        "description": "Explore your creativity through painting and drawing",
-        "schedule": "Thursdays, 3:30 PM - 5:00 PM",
-        "max_participants": 15,
-        "participants": ["amelia@mergington.edu", "harper@mergington.edu"]
-    },
-    "Drama Club": {
-        "description": "Act, direct, and produce plays and performances",
-        "schedule": "Mondays and Wednesdays, 4:00 PM - 5:30 PM",
-        "max_participants": 20,
-        "participants": ["ella@mergington.edu", "scarlett@mergington.edu"]
-    },
-    "Math Club": {
-        "description": "Solve challenging problems and participate in math competitions",
-        "schedule": "Tuesdays, 3:30 PM - 4:30 PM",
-        "max_participants": 10,
-        "participants": ["james@mergington.edu", "benjamin@mergington.edu"]
-    },
-    "Debate Team": {
-        "description": "Develop public speaking and argumentation skills",
-        "schedule": "Fridays, 4:00 PM - 5:30 PM",
-        "max_participants": 12,
-        "participants": ["charlotte@mergington.edu", "henry@mergington.edu"]
-    }
-}
 
 
 @app.get("/")
@@ -105,8 +132,18 @@ def signup_for_activity(activity_name: str, email: str):
             detail="Student is already signed up"
         )
 
+    # Validate activity is not at maximum capacity (if a limit is defined)
+    max_participants = activity.get("max_participants")
+    if max_participants is not None:
+        current_count = len(activity.get("participants", []))
+        if current_count >= max_participants:
+            raise HTTPException(
+                status_code=400,
+                detail="Activity is at full capacity"
+            )
     # Add student
     activity["participants"].append(email)
+    mark_activities_dirty()  # Mark for batched save
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
@@ -129,4 +166,5 @@ def unregister_from_activity(activity_name: str, email: str):
 
     # Remove student
     activity["participants"].remove(email)
+    mark_activities_dirty()  # Mark for batched save
     return {"message": f"Unregistered {email} from {activity_name}"}
