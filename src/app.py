@@ -11,6 +11,7 @@ from fastapi.responses import RedirectResponse
 import os
 import json
 from pathlib import Path
+from filelock import FileLock
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -22,26 +23,24 @@ app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
 
 # Load activities from JSON file
 activities_file = os.path.join(Path(__file__).parent, "activities.json")
+activities_lock_file = os.path.join(Path(__file__).parent, "activities.json.lock")
 
 def load_activities():
-    """Load activities from JSON file"""
+    """Load activities from JSON file (internal use only, call within lock)"""
     with open(activities_file, 'r') as f:
         return json.load(f)
 
-def save_activities():
-    """Save activities to JSON file"""
+def save_activities(activities_data):
+    """Save activities to JSON file (internal use only, call within lock)"""
     try:
         with open(activities_file, 'w') as f:
-            json.dump(activities, f, indent=2)
+            json.dump(activities_data, f, indent=2)
     except OSError:
         # Convert file I/O errors into a clear HTTP error response
         raise HTTPException(
             status_code=500,
             detail="Failed to save activities"
         )
-
-# Load activities at startup
-activities = load_activities()
 
 
 @app.get("/")
@@ -51,50 +50,65 @@ def root():
 
 @app.get("/activities")
 def get_activities():
-    return activities
+    """Get all activities"""
+    lock = FileLock(activities_lock_file)
+    with lock:
+        return load_activities()
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    lock = FileLock(activities_lock_file)
+    with lock:
+        # Load current activities
+        activities = load_activities()
+        
+        # Validate activity exists
+        if activity_name not in activities:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
-    activity = activities[activity_name]
+        # Get the specific activity
+        activity = activities[activity_name]
 
-    # Validate student is not already signed up
-    if email in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is already signed up"
-        )
+        # Validate student is not already signed up
+        if email in activity["participants"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Student is already signed up"
+            )
 
-    # Add student
-    activity["participants"].append(email)
-    save_activities()  # Persist changes to JSON file
+        # Add student
+        activity["participants"].append(email)
+        save_activities(activities)  # Persist changes to JSON file
+        
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/unregister")
 def unregister_from_activity(activity_name: str, email: str):
     """Unregister a student from an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+    lock = FileLock(activities_lock_file)
+    with lock:
+        # Load current activities
+        activities = load_activities()
+        
+        # Validate activity exists
+        if activity_name not in activities:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
-    activity = activities[activity_name]
+        # Get the specific activity
+        activity = activities[activity_name]
 
-    # Validate student is signed up
-    if email not in activity["participants"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Student is not signed up for this activity"
-        )
+        # Validate student is signed up
+        if email not in activity["participants"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Student is not signed up for this activity"
+            )
 
-    # Remove student
-    activity["participants"].remove(email)
-    save_activities()  # Persist changes to JSON file
+        # Remove student
+        activity["participants"].remove(email)
+        save_activities(activities)  # Persist changes to JSON file
+        
     return {"message": f"Unregistered {email} from {activity_name}"}
