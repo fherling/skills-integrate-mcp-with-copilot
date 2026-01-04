@@ -13,7 +13,6 @@ import os
 import json
 from pathlib import Path
 import threading
-import time
 import copy
 
 # Load activities from JSON file
@@ -43,6 +42,9 @@ def save_activities_to_disk():
         try:
             # Create a snapshot of activities while holding the lock
             activities_snapshot = copy.deepcopy(activities)
+            # Clear dirty flag while still holding the lock
+            # If changes happen after this point, they'll set it again
+            activities_dirty = False
         except Exception as e:
             print(f"Error creating snapshot of activities: {e}")
             return
@@ -51,10 +53,11 @@ def save_activities_to_disk():
     try:
         with open(activities_file, 'w') as f:
             json.dump(activities_snapshot, f, indent=2)
-        with activities_lock:
-            activities_dirty = False
     except OSError as e:
         # Log error but don't raise - background task should continue
+        # Mark as dirty again so we retry on the next cycle
+        with activities_lock:
+            activities_dirty = True
         print(f"Error saving activities: {e}")
 
 def mark_activities_dirty():
