@@ -19,6 +19,10 @@ import copy
 # Load activities from JSON file
 activities_file = os.path.join(Path(__file__).parent, "activities.json")
 
+# Configuration constants
+SAVE_INTERVAL_SECONDS = 5  # How often to batch-save changes to disk
+SHUTDOWN_TIMEOUT_SECONDS = 10  # Maximum time to wait for background thread during shutdown
+
 # Flag to track if activities have been modified
 activities_dirty = False
 activities_lock = threading.Lock()
@@ -63,7 +67,10 @@ def periodic_save():
     """Background task to periodically save activities"""
     while not shutdown_event.is_set():
         # Use wait instead of sleep for more responsive shutdown
-        shutdown_event.wait(5)  # Save every 5 seconds if there are changes
+        if shutdown_event.wait(SAVE_INTERVAL_SECONDS):
+            # shutdown_event was set, exit immediately without saving
+            # (lifespan handler will do the final save)
+            break
         save_activities_to_disk()
 
 # Load activities at startup
@@ -74,13 +81,13 @@ async def lifespan(app: FastAPI):
     """Manage startup and shutdown events"""
     global save_thread
     # Startup: Start background save thread
-    save_thread = threading.Thread(target=periodic_save, daemon=False)
+    save_thread = threading.Thread(target=periodic_save, daemon=True)
     save_thread.start()
     yield
     # Shutdown: Stop background thread and save pending changes
     shutdown_event.set()
     if save_thread:
-        save_thread.join(timeout=10)  # Increased timeout for large files
+        save_thread.join(timeout=SHUTDOWN_TIMEOUT_SECONDS)
     save_activities_to_disk()
 
 app = FastAPI(
